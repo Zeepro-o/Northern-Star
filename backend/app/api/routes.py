@@ -18,6 +18,7 @@ from ..models.schemas import (
     AnswerResponse,
     Claim,
     IndexSummary,
+    JudgeResult,
     QuestionRequest,
     RepositoryManifest,
     RepositoryRequest,
@@ -26,6 +27,7 @@ from ..models.schemas import (
 from ..services import github as github_service
 from ..services import qa as qa_service
 from ..services import claims as claims_service
+from ..services import judge as judge_service
 from ..services.indexing import evidence_db_path, index_repository
 from ..services.ingestion import ingest_github_repo, load_manifest
 from ..services.llm import (
@@ -291,6 +293,44 @@ def verify_repository_claim(
         raise HTTPException(
             status_code=504,
             detail="Ollama timed out while evaluating the claim.",
+        )
+    except OllamaResponseError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# M5 — Evidence-Based Project Judging
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/repos/{owner}/{repo}/judge",
+    response_model=JudgeResult,
+    summary="Judge a repository across five dimensions using evidence",
+)
+def judge_repository_endpoint(
+    owner: str, repo: str, top_k: int = Query(None, ge=1, le=20, description="Evidence budget per dimension")
+) -> JudgeResult:
+    repo_dir, settings = _repo_dir(owner, repo)
+    if not (repo_dir / settings.manifest_filename).exists():
+        raise HTTPException(
+            status_code=404, detail="Repository has not been ingested yet."
+        )
+    repo_id = f"{owner.lower()}/{repo.lower()}"
+    try:
+        return judge_service.judge_repository(
+            repo_id=repo_id,
+            settings=settings,
+            top_k=top_k,
+        )
+    except RepoNotIndexedError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except (OllamaUnavailableError, OllamaModelNotInstalledError) as exc:
+        raise HTTPException(status_code=503, detail=f"Ollama unavailable: {exc}")
+    except OllamaTimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail="Ollama timed out while evaluating the repository.",
         )
     except OllamaResponseError as exc:
         raise HTTPException(status_code=502, detail=str(exc))

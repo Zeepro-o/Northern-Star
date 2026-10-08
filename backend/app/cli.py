@@ -26,10 +26,11 @@ from typing import Callable, Optional
 
 from .config import get_settings
 from .main import APP_VERSION
-from .models.schemas import AnswerResponse, Claim, IndexSummary, RepositoryManifest, SearchResponse
+from .models.schemas import AnswerResponse, Claim, IndexSummary, JudgeResult, RepositoryManifest, SearchResponse
 from .services import github as github_service
 from .services import qa as qa_service
 from .services import claims as claims_service
+from .services import judge as judge_service
 from .services.indexing import evidence_db_path, index_repository
 from .services.ingestion import ingest_github_repo, load_manifest
 from .services.llm import OllamaError
@@ -361,6 +362,59 @@ def _cmd_version(args) -> int:
     return 0
 
 
+@_wrap_errors
+def _cmd_judge(args) -> int:
+    repo_dir, settings, repo_id = _repo_common(args.repo)
+    if not (repo_dir / settings.manifest_filename).exists():
+        return _fail("Repository has not been ingested yet.")
+    if args.model:
+        from dataclasses import replace
+
+        settings = replace(settings, ollama_model=args.model)
+
+    judged = judge_service.judge_repository(
+        repo_id=repo_id,
+        settings=settings,
+        top_k=args.top_k,
+    )
+    if args.json:
+        return _emit_json(JudgeResult.model_validate(judged).model_dump(mode="json"))
+
+    print(f"repo:    {repo_id}")
+    print(f"overall score: {judged.overall_score}/100")
+    print()
+    print("dimensions:")
+    for dim in judged.dimensions:
+        print(f"  {dim.name}: {dim.score}/10")
+        if dim.explanation:
+            print(f"    {dim.explanation}")
+    print()
+    print("strengths:")
+    for s in judged.strengths:
+        print(f"  + {s}")
+    print()
+    print("weaknesses:")
+    for w in judged.weaknesses:
+        print(f"  - {w}")
+    print()
+    print("recommendations:")
+    for r in judged.recommendations:
+        print(f"  > {r}")
+    print()
+    print("claim integrity:")
+    for verdict, count in judged.claim_integrity_summary.items():
+        print(f"  {verdict}: {count}")
+    print(f"  total claims: {judged.total_claims}")
+    print()
+    if judged.evidence_citations:
+        print("evidence:")
+        for c in judged.evidence_citations:
+            print(f"  {c.id}  {c.file_path}:{c.start_line}-{c.end_line}")
+    else:
+        print("evidence: (none)")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -424,6 +478,13 @@ def build_parser():
     p.add_argument("--model", default=None, help="Ollama model for this verify (default: OLLAMA_MODEL)")
     common(p)
     p.set_defaults(handler=_cmd_verify)
+
+    p = sub.add_parser("judge", help="judge a repository across five dimensions using evidence")
+    p.add_argument("repo", metavar="owner/repo")
+    p.add_argument("--top-k", type=int, default=None, help="evidence chunks used per dimension (default: QA_TOP_K)")
+    p.add_argument("--model", default=None, help="Ollama model for this judge (default: OLLAMA_MODEL)")
+    common(p)
+    p.set_defaults(handler=_cmd_judge)
 
     p = sub.add_parser("version", help="print the version")
     p.set_defaults(handler=_cmd_version)

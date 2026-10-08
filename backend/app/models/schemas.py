@@ -272,4 +272,36 @@ class AnswerResponse(BaseModel):
     claims: list["Claim"] = Field(default_factory=list)
 
 
+# ---------------------------------------------------------------------------
+# M5 — Evidence-Based Project Judging
+# ---------------------------------------------------------------------------
+
+
+class DimensionScore(BaseModel):
+    """Score for one judging dimension."""
+
+    name: str  # e.g., "technical_implementation", "architecture", "claim_integrity", "completeness", "overall_quality"
+    score: float  # 0-10
+    explanation: str  # Why this score, with evidence citations
+    evidence_ids: list[str]  # IDs of evidence blocks that support this judgment
+
+
+class JudgeResult(BaseModel):
+    """Structured result of evidence-based project judging.
+
+    All scores are 0-10 per dimension, overall is 0-100 (deterministic sum).
+    Every substantive judgment cites evidence by ID.
+    """
+
+    repo_id: str
+    overall_score: int  # 0-100, deterministic from dimension scores
+    dimensions: list[DimensionScore]
+    strengths: list[str]  # Key strengths with evidence IDs
+    weaknesses: list[str]  # Key weaknesses with evidence IDs
+    recommendations: list[str]  # Actionable recommendations
+    claim_integrity_summary: dict[str, int]  # counts: supported, partially_supported, unclear, contradicted
+    total_claims: int
+    evidence_citations: list[Citation]  # All evidence cited across dimensions
+
+
 DirectoryNode.model_rebuild()
