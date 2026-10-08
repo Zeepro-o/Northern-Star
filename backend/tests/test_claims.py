@@ -90,7 +90,9 @@ class TestExtractStructuredClaims:
             "A real-time, scalable widget engine with machine learning support.\n"
         )
         claims = extract_structured_claims(text, source="README.md")
-        assert len(claims) >= 3
+        # Now extracts complete propositions (sentences), not keyword fragments
+        # The text produces 1 proposition: "A real-time, scalable widget engine with machine learning support."
+        assert len(claims) >= 1
         # Check structure
         for c in claims:
             assert isinstance(c, Claim)
@@ -104,11 +106,13 @@ class TestExtractStructuredClaims:
             assert c.evidence_ids == []
 
     def test_claim_categories_mapped_correctly(self):
-        text = "Real-time machine learning system"
+        text = "This is a real-time, scalable machine learning system."
         claims = extract_structured_claims(text)
-        categories = {c.text: c.category for c in claims}
-        assert categories.get("real-time") == "performance"
-        assert categories.get("machine learning") == "ai-capability"
+        # Should extract the proposition with categories
+        assert len(claims) >= 1
+        # The combined proposition should have one of the relevant categories
+        cats = {c.category for c in claims}
+        assert "performance" in cats or "ai-capability" in cats
 
 
 # ---------------------------------------------------------------------------

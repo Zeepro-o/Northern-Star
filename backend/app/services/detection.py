@@ -570,7 +570,10 @@ README_CLAIM_KEYWORDS: list[str] = [
 
 
 def extract_readme_claims(text: str) -> list[str]:
-    """Return README keyword mentions (unverified claims for future fact-checking)."""
+    """Return README keyword mentions (unverified claims for future fact-checking).
+
+    This legacy function returns keyword fragments for backward compatibility.
+    """
     if not text:
         return []
     lower = text.lower()
@@ -585,67 +588,132 @@ def extract_readme_claims(text: str) -> list[str]:
     return sorted(found)
 
 
+def extract_propositions(text: str) -> list[str]:
+    """Extract complete propositional claims from README text.
+
+    Splits text into sentences and filters for factual/assertive statements
+    that make verifiable claims about the project. Returns deduplicated
+    propositions suitable for evidence verification.
+    """
+    if not text:
+        return []
+
+    # Strip markdown code blocks, HTML, and links first
+    cleaned = re.sub(r"```[\s\S]*?```", "", text)  # code blocks
+    cleaned = re.sub(r"`[^`]+`", "", cleaned)  # inline code
+    cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)  # [text](url) -> text
+    cleaned = re.sub(r"\[([^\]]+)\]\[[^\]]+\]", r"\1", cleaned)  # [text][ref] -> text
+    cleaned = re.sub(r"^\s*\[[^\]]+\]:\s*\S+.*$", "", cleaned, flags=re.MULTILINE)  # reference links [ref]: url
+    cleaned = re.sub(r"<[^>]+>", "", cleaned)  # HTML tags
+    cleaned = re.sub(r"#+\s*", "", cleaned)  # headings
+    cleaned = re.sub(r"^\s*[\*\-]\s+", "", cleaned, flags=re.MULTILINE)  # list items
+    cleaned = re.sub(r"^\s*>\s*", "", cleaned, flags=re.MULTILINE)  # blockquotes
+    cleaned = re.sub(r"---+", "", cleaned)  # horizontal rules
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)  # excessive newlines
+
+    # Split into paragraphs first, then sentences within each paragraph
+    paragraphs = re.split(r"\n\s*\n", cleaned)
+    propositions: list[str] = []
+
+    # Heuristics for claim-like sentences
+    claim_indicators = [
+        "is a", "is an", "provides", "supports", "enables", "allows",
+        "includes", "features", "offers", "implements", "uses", "requires",
+        "designed to", "built for", "handles", "manages", "automates",
+        "integrates with", "compatible with", "based on", "powered by",
+        "runs on", "deploy", "scale", "secure", "fast", "lightweight",
+        "robust", "reliable", "production", "enterprise", "cloud-native",
+        "real-time", "async", "distributed", "microservices", "serverless",
+        "zero dependencies", "self-hosted", "autonomous", "AI", "ML",
+        "machine learning", "deep learning", "neural", "LLM", "NLP",
+    ]
+
+    for para in paragraphs:
+        para = para.strip()
+        if not para or len(para) < 30:
+            continue
+        # Split paragraph into sentences
+        sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', para)
+        for sent in sentences:
+            sent = sent.strip(" \t\n\r\"'()[]{}")
+            if not sent or len(sent) < 30:
+                continue
+            # Skip very long fragments
+            if len(sent) > 400:
+                continue
+            # Skip fragments that look like sentence fragments
+            if sent.startswith(("and ", "or ", "but ", "the ", "a ", "an ", "this ", "that ", "it ", "to ", "for ", "in ", "on ", "with ", "by ", "of ", "as ", "is ", "are ", "was ", "were ", "be ", "been ", "have ", "has ", "had ", "do ", "does ", "did ", "will ", "would ", "could ", "should ", "may ", "might ", "must ", "shall ")):
+                continue
+            # Must contain at least one claim indicator or be a complete substantial sentence
+            lower = sent.lower()
+            has_indicator = any(indicator in lower for indicator in claim_indicators)
+            is_complete = sent.endswith(".") and len(sent.split()) >= 10
+            if has_indicator or is_complete:
+                propositions.append(sent)
+
+    # Deduplicate while preserving order (case-insensitive)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for p in propositions:
+        key = p.lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(p)
+
+    # Limit to top 10 most relevant claims
+    return unique[:10]
+
+
 def extract_structured_claims(text: str, source: str = "README.md") -> list[Claim]:
     """Return structured Claim objects from README text.
 
-    Each claim gets a deterministic ID, is tagged as DOCUMENTATION kind,
-    and receives a category hint derived from the keyword that triggered it.
-    The verdict and evidence_ids are left unpopulated — the verification
-    service fills those in later.
+    Extracts complete propositional claims (sentences making verifiable assertions)
+    rather than keyword fragments. Each claim gets a deterministic ID, is tagged
+    as DOCUMENTATION kind, and receives a category hint. The verdict and
+    evidence_ids are left unpopulated — the verification service fills those in.
     """
     from ..models.schemas import FileKind
 
     if not text:
         return []
 
-    raw_claims = extract_readme_claims(text)
+    propositions = extract_propositions(text)
     claims: list[Claim] = []
 
-    # Map keywords to categories for more meaningful grouping
-    keyword_to_category: dict[str, str] = {
-        "machine learning": "ai-capability",
-        "artificial intelligence": "ai-capability",
-        "deep learning": "ai-capability",
-        "neural network": "ai-capability",
-        "nlp": "ai-capability",
-        "natural language processing": "ai-capability",
-        "large language model": "ai-capability",
-        "llm": "ai-capability",
-        "real-time": "performance",
-        "scalable": "performance",
-        "high performance": "performance",
-        "performant": "performance",
-        "distributed": "architecture",
-        "decentralized": "architecture",
-        "microservices": "architecture",
-        "cloud-native": "architecture",
-        "serverless": "architecture",
-        "kubernetes": "architecture",
-        "secure": "security",
-        "production-ready": "quality",
-        "lightweight": "quality",
-        "blazing fast": "quality",
-        "zero dependencies": "quality",
-        "self-hosted": "deployment",
-        "autonomous": "quality",
+    # Category hints based on keywords in the proposition
+    category_keywords: dict[str, str] = {
+        "ai-capability": ["machine learning", "artificial intelligence", "deep learning",
+                          "neural", "nlp", "natural language", "llm", "large language",
+                          "ai ", " ai", "ml ", " ml"],
+        "performance": ["real-time", "scalable", "high performance", "performant",
+                        "fast", "lightweight", "blazing", "speed", "latency"],
+        "architecture": ["distributed", "decentralized", "microservices",
+                         "cloud-native", "serverless", "kubernetes"],
+        "security": ["secure", "security", "authentication", "authorization",
+                     "encryption", "vulnerability"],
+        "quality": ["production-ready", "production ready", "robust", "reliable",
+                    "enterprise", "zero dependencies", "self-hosted", "autonomous"],
     }
 
-    # Also map individual keywords that appear in the text
-    lower_text = text.lower()
-    for claim in raw_claims:
-        # Determine category from keyword-to-category map, fallback to "general"
-        category = keyword_to_category.get(claim, "general")
+    for i, prop in enumerate(propositions):
+        # Determine category from keywords in the proposition
+        lower_prop = prop.lower()
+        category = "general"
+        for cat, keywords in category_keywords.items():
+            if any(kw in lower_prop for kw in keywords):
+                category = cat
+                break
 
-        # Generate a deterministic claim ID from the claim text
+        # Generate a deterministic claim ID from the proposition
         claim_id = (
-            claim.lower().replace(" ", "_").replace("-", "_")[:40]
-            or "claim"
+            re.sub(r"[^a-z0-9_]", "_", prop.lower())[:40].strip("_")
+            or f"claim_{i}"
         )
 
         claims.append(
             Claim(
                 id=claim_id,
-                text=claim,
+                text=prop,
                 source=source,
                 kind=FileKind.DOCUMENTATION,
                 category=category,

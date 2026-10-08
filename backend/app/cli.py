@@ -280,22 +280,25 @@ def _cmd_claims(args) -> int:
             return _emit_json([])
         print("No README present.")
         return 0
-    # Reconstruct structured claims from the raw keyword list
-    claims_list: list[Claim] = []
-    for i, kw in enumerate(manifest.readme_claims):
-        claims_list.append(
-            Claim(
-                id=f"claim_{i}",
-                text=kw,
-                source="README.md",
-                kind="documentation",
-                category="general",
-                verdict="unclear",
-                verdict_explanation="Awaiting evidence verification.",
-                evidence_ids=[],
-                repo_id=repo_id,
-            )
-        )
+    # Read README content and extract structured claims using the new extraction
+    readme_path = repo_dir / "checkout" / "README.md"
+    if not readme_path.exists():
+        # Try case-insensitive
+        for f in (repo_dir / "checkout").iterdir():
+            if f.name.lower() == "readme.md":
+                readme_path = f
+                break
+    if not readme_path.exists():
+        if args.json:
+            return _emit_json([])
+        print("README.md not found in checkout.")
+        return 0
+    readme_text = readme_path.read_text(encoding="utf-8", errors="replace")
+    from app.services.detection import extract_structured_claims
+    claims_list = extract_structured_claims(readme_text, source="README.md")
+    # Set repo_id on each claim
+    for c in claims_list:
+        c.repo_id = repo_id
     if args.json:
         return _emit_json([c.model_dump(mode="json") for c in claims_list])
     print(f"Repository: {repo_id}")

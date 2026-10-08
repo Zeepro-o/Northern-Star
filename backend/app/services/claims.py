@@ -275,7 +275,22 @@ def verify_claim(
     parsed = parse_verification(raw, valid_ids)
     declared = validate_citations(parsed.citations, valid_ids)
     inline = _inline_citation_ids(parsed.explanation, valid_ids)
-    final_ids = [c for c in declared if c in inline]  # declared order kept
+
+    # Primary: citations with both declared AND inline markers (strict)
+    primary_ids = [c for c in declared if c in inline]
+
+    # Recovery: if primary is empty but LLM declared valid IDs, attempt safe recovery
+    recovered_ids: list[str] = []
+    if not primary_ids and declared:
+        recovered_ids = _recover_citations(
+            explanation=parsed.explanation,
+            declared=declared,
+            valid_ids=valid_ids,
+            blocks={b.id: b for b in blocks},
+        )
+
+    # Combine: primary first, then recovered (preserving order)
+    final_ids = primary_ids + [c for c in recovered_ids if c not in primary_ids]
     sanitized_explanation = sanitize_answer(parsed.explanation, set(final_ids))
 
     # 7 — Map verdict: if no validated citations, force "unclear"
@@ -311,3 +326,68 @@ def _inline_citation_ids(text: str, valid_ids: set[str]) -> list[str]:
             seen.add(cid)
             out.append(cid)
     return out
+
+
+def _recover_citations(
+    explanation: str,
+    declared: list[str],
+    valid_ids: set[str],
+    blocks: dict[str, EvidenceBlock],
+) -> list[str]:
+    """Safely recover citations that were declared but lack inline markers.
+
+    Recovery is allowed ONLY when ALL conditions hold:
+    1. The LLM declared the evidence ID in its citations array
+    2. The evidence ID was actually supplied to the LLM (in valid_ids)
+    3. The evidence ID passes deterministic validation (not fabricated)
+    4. The explanation text semantically refers to that evidence (contains
+       key terms from the evidence content)
+
+    This prevents hallucinated citations while recovering from the common
+    LLM failure mode of declaring citations but forgetting inline markers.
+    """
+    recovered: list[str] = []
+
+    # Pre-compute evidence content keywords for semantic matching
+    evidence_keywords: dict[str, set[str]] = {}
+    for eid, block in blocks.items():
+        # Extract meaningful tokens from evidence content (identifiers, keywords)
+        content_lower = block.content.lower()
+        # Get alphanumeric tokens of length >= 4 (stricter)
+        tokens = set(re.findall(r"[a-z0-9_]{4,}", content_lower))
+        # Filter out very common words
+        stopwords = {
+            "the", "and", "for", "are", "but", "not", "you", "all", "can", "has", "was", "one", "our", "out", "get",
+            "use", "used", "using", "this", "that", "with", "from", "have", "had", "will", "would", "could", "should",
+            "may", "might", "must", "shall", "into", "onto", "upon", "over", "under", "again", "also", "such", "than",
+            "then", "when", "where", "which", "while", "after", "before", "since", "until", "unless", "because",
+            "through", "during", "without", "within", "between", "among", "about", "above", "below", "beyond",
+            "around", "across", "against", "along", "inside", "outside", "throughout", "despite", "except",
+            "toward", "towards", "evidence", "shows", "show", "showed", "shown", "states", "state", "stated",
+            "claim", "claims", "claimed", "file", "files", "code", "codes", "line", "lines", "function", "functions",
+            "class", "classes", "module", "modules", "import", "imports", "from", "def", "return", "returns",
+            "true", "false", "none", "null", "test", "tests", "testing", "example", "examples", "simple",
+        }
+        tokens = {t for t in tokens if t not in stopwords}
+        evidence_keywords[eid] = tokens
+
+    # Also extract tokens from explanation
+    expl_tokens = set(re.findall(r"[a-z0-9_]{4,}", explanation.lower()))
+    expl_tokens = {t for t in expl_tokens if t not in stopwords}
+
+    for cid in declared:
+        if cid not in valid_ids:
+            continue  # Not supplied to LLM
+        if cid not in blocks:
+            continue  # Not in evidence blocks
+
+        # Check if explanation semantically refers to this evidence
+        # by looking for token overlap
+        block_tokens = evidence_keywords.get(cid, set())
+        if block_tokens:
+            overlap = block_tokens & expl_tokens
+            # Require at least 3 meaningful token overlaps for recovery (stricter)
+            if len(overlap) >= 3:
+                recovered.append(cid)
+
+    return recovered
