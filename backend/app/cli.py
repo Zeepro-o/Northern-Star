@@ -26,11 +26,12 @@ from typing import Callable, Optional
 
 from .config import get_settings
 from .main import APP_VERSION
-from .models.schemas import AnswerResponse, Claim, IndexSummary, JudgeResult, RepositoryManifest, SearchResponse
+from .models.schemas import AnswerResponse, ChallengeResult, Claim, IndexSummary, JudgeResult, RepositoryManifest, SearchResponse
 from .services import github as github_service
 from .services import qa as qa_service
 from .services import claims as claims_service
 from .services import judge as judge_service
+from .services import challenges as challenges_service
 from .services.indexing import evidence_db_path, index_repository
 from .services.ingestion import ingest_github_repo, load_manifest
 from .services.llm import OllamaError
@@ -415,6 +416,50 @@ def _cmd_judge(args) -> int:
     return 0
 
 
+@_wrap_errors
+def _cmd_challenges(args) -> int:
+    repo_dir, settings, repo_id = _repo_common(args.repo)
+    if not (repo_dir / settings.manifest_filename).exists():
+        return _fail("Repository has not been ingested yet.")
+    if args.model:
+        from dataclasses import replace
+
+        settings = replace(settings, ollama_model=args.model)
+
+    result = challenges_service.generate_challenges(
+        repo_id=repo_id,
+        settings=settings,
+        top_k=args.top_k,
+    )
+    if args.json:
+        return _emit_json(ChallengeResult.model_validate(result).model_dump(mode="json"))
+
+    print(f"repo:    {repo_id}")
+    print(f"total challenges: {result.total_challenges}")
+    print(f"  high: {result.high_severity}, medium: {result.medium_severity}, low: {result.low_severity}")
+    print()
+    for c in result.challenges:
+        print(f"challenge {c.id}:")
+        print(f"  claim:     {c.claim}")
+        print(f"  challenge: {c.challenge}")
+        print(f"  severity:  {c.severity}")
+        print(f"  category:  {c.category}")
+        print(f"  confidence: {c.confidence}")
+        print(f"  explanation: {c.explanation}")
+        if c.evidence_ids:
+            print(f"  evidence:  {', '.join(c.evidence_ids)}")
+        print()
+    print("claim integrity summary:")
+    print()
+    if result.evidence_citations:
+        print("evidence:")
+        for c in result.evidence_citations:
+            print(f"  {c.id}  {c.file_path}:{c.start_line}-{c.end_line}")
+    else:
+        print("evidence: (none)")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -485,6 +530,13 @@ def build_parser():
     p.add_argument("--model", default=None, help="Ollama model for this judge (default: OLLAMA_MODEL)")
     common(p)
     p.set_defaults(handler=_cmd_judge)
+
+    p = sub.add_parser("challenges", help="generate red-team challenges for a repository")
+    p.add_argument("repo", metavar="owner/repo")
+    p.add_argument("--top-k", type=int, default=None, help="evidence chunks used per dimension (default: QA_TOP_K)")
+    p.add_argument("--model", default=None, help="Ollama model for this challenges (default: OLLAMA_MODEL)")
+    common(p)
+    p.set_defaults(handler=_cmd_challenges)
 
     p = sub.add_parser("version", help="print the version")
     p.set_defaults(handler=_cmd_version)

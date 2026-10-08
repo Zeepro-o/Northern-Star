@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from ..config import get_settings
 from ..models.schemas import (
     AnswerResponse,
+    ChallengeResult,
     Claim,
     IndexSummary,
     JudgeResult,
@@ -28,6 +29,7 @@ from ..services import github as github_service
 from ..services import qa as qa_service
 from ..services import claims as claims_service
 from ..services import judge as judge_service
+from ..services import challenges as challenges_service
 from ..services.indexing import evidence_db_path, index_repository
 from ..services.ingestion import ingest_github_repo, load_manifest
 from ..services.llm import (
@@ -331,6 +333,44 @@ def judge_repository_endpoint(
         raise HTTPException(
             status_code=504,
             detail="Ollama timed out while evaluating the repository.",
+        )
+    except OllamaResponseError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# M6 — Red-Team / Challenge Engine
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/repos/{owner}/{repo}/challenges",
+    response_model=ChallengeResult,
+    summary="Generate red-team challenges for a repository",
+)
+def generate_challenges_endpoint(
+    owner: str, repo: str, top_k: int = Query(None, ge=1, le=20, description="Evidence budget per dimension")
+) -> ChallengeResult:
+    repo_dir, settings = _repo_dir(owner, repo)
+    if not (repo_dir / settings.manifest_filename).exists():
+        raise HTTPException(
+            status_code=404, detail="Repository has not been ingested yet."
+        )
+    repo_id = f"{owner.lower()}/{repo.lower()}"
+    try:
+        return challenges_service.generate_challenges(
+            repo_id=repo_id,
+            settings=settings,
+            top_k=top_k,
+        )
+    except RepoNotIndexedError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except (OllamaUnavailableError, OllamaModelNotInstalledError) as exc:
+        raise HTTPException(status_code=503, detail=f"Ollama unavailable: {exc}")
+    except OllamaTimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail="Ollama timed out while generating challenges.",
         )
     except OllamaResponseError as exc:
         raise HTTPException(status_code=502, detail=str(exc))

@@ -304,4 +304,62 @@ class JudgeResult(BaseModel):
     evidence_citations: list[Citation]  # All evidence cited across dimensions
 
 
+# ---------------------------------------------------------------------------
+# M6 — Red-Team / Challenge Engine
+# ---------------------------------------------------------------------------
+
+
+class ChallengeCategory(str, Enum):
+    """Category of a challenge."""
+
+    UNSUPPORTED_CLAIM = "unsupported_claim"
+    CONTRADICTION = "contradiction"
+    MISSING_IMPLEMENTATION = "missing_implementation"
+    ARCHITECTURE = "architecture"
+    SECURITY = "security"
+    RELIABILITY = "reliability"
+    SCALABILITY = "scalability"
+    TESTING = "testing"
+    COMPLETENESS = "completeness"
+    DOCUMENTATION = "documentation"
+
+
+class ChallengeSeverity(str, Enum):
+    """Severity of a challenge."""
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class Challenge(BaseModel):
+    """A red-team challenge against a repository claim or implementation.
+
+    Every challenge is grounded in evidence and relates to an actual
+    repository claim or implementation observation.
+    """
+
+    id: str  # e.g., "challenge_1"
+    claim: str  # The claim or observation being challenged
+    challenge: str  # The challenge question/statement
+    severity: ChallengeSeverity
+    category: ChallengeCategory
+    explanation: str  # Human-readable explanation with [E#] citations
+    evidence_ids: list[str]  # IDs of evidence blocks supporting the challenge
+    repo_id: str  # "owner/repo" for isolation
+    confidence: Literal["high", "medium", "low"]  # Confidence in the challenge
+
+
+class ChallengeResult(BaseModel):
+    """Structured result of red-team challenge generation."""
+
+    repo_id: str
+    challenges: list[Challenge]
+    total_challenges: int
+    high_severity: int
+    medium_severity: int
+    low_severity: int
+    evidence_citations: list[Citation]  # All evidence cited across challenges
+
+
 DirectoryNode.model_rebuild()
