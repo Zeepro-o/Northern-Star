@@ -9,6 +9,7 @@ import pytest
 
 from app.cli import main
 from app.config import get_settings
+from app.models.schemas import Claim
 from app.services.github import FetchedRepository, InvalidGitHubUrlError
 from app.services.indexing import index_repository
 from app.services.ingestion import _assemble_manifest, analyze_repository
@@ -253,3 +254,88 @@ class TestVersion:
     def test_version_prints_app_version(self, capsys):
         assert main(["version"]) == 0
         assert capsys.readouterr().out.strip() == "0.3.0"
+
+
+class TestClaims:
+    def test_claims_exit_0_prints_claims(self, tmp_path, no_default_storage, monkeypatch, capsys):
+        _seed_repo(tmp_path, no_default_storage)
+        assert main(["claims", "acme/evidence"]) == 0
+        out = capsys.readouterr().out
+        assert "Repository: acme/evidence" in out
+        assert "README claims found:" in out
+        # The evidence repo's README has no claim keywords, so count is 0
+
+    def test_claims_json_parses(self, tmp_path, no_default_storage, monkeypatch):
+        _seed_repo(tmp_path, no_default_storage)
+        assert main(["claims", "acme/evidence", "--json"]) == 0
+
+    def test_claims_not_ingested_exit_1(self, no_default_storage, capsys):
+        assert main(["claims", "ghost/nope"]) == 1
+        assert "not been ingested" in capsys.readouterr().err
+
+
+class TestVerify:
+    def test_verify_exit_0_prints_verdict(self, tmp_path, no_default_storage, monkeypatch, capsys):
+        _seed_repo(tmp_path, no_default_storage)
+        self._stub_llm(
+            monkeypatch,
+            '{"verdict": "supported", "explanation": "Auth is enforced in [E1].", "citations": ["E1"]}',
+        )
+        # "authentication" matches src/auth/middleware.py in the evidence fixture
+        assert main(["verify", "acme/evidence", "authentication is required"]) == 0
+        out = capsys.readouterr().out
+        assert "verdict: supported" in out
+        assert "E1" in out
+
+    def test_verify_unclear_when_no_evidence(self, tmp_path, no_default_storage, monkeypatch, capsys):
+        _seed_repo(tmp_path, no_default_storage)
+        self._stub_llm(monkeypatch, "should not be called")
+        # The claim "uses Cassandra" won't match any evidence in the test repo
+        assert main(["verify", "acme/evidence", "uses Cassandra"]) == 0
+        out = capsys.readouterr().out
+        assert "verdict: unclear" in out
+
+    def test_verify_json_parses(self, tmp_path, no_default_storage, monkeypatch):
+        _seed_repo(tmp_path, no_default_storage)
+        self._stub_llm(
+            monkeypatch,
+            '{"verdict": "contradicted", "explanation": "Uses MongoDB [E1].", "citations": ["E1"]}',
+        )
+        assert main(["verify", "acme/evidence", "uses Redis", "--json"]) == 0
+
+    def test_verify_model_flag_replaces_settings(self, tmp_path, no_default_storage, monkeypatch):
+        _seed_repo(tmp_path, no_default_storage)
+        seen = {}
+
+        def fake_verify(repo_id, claim, **kw):
+            seen.update(kw)
+            return Claim(
+                id="claim_0",
+                text=claim.text,
+                source=claim.source,
+                kind=claim.kind,
+                category=claim.category,
+                verdict="unclear",
+                verdict_explanation="",
+                evidence_ids=[],
+                repo_id=repo_id,
+            )
+
+        monkeypatch.setattr("app.services.claims.verify_claim", fake_verify)
+        from app.cli import main
+        assert main(["verify", "acme/evidence", "test claim", "--model", "qwen2.5:3b"]) == 0
+        assert seen["settings"].ollama_model == "qwen2.5:3b"
+
+    def test_verify_unindexed_exit_1(self, tmp_path, no_default_storage, capsys):
+        _seed_repo(tmp_path, no_default_storage, index=False)
+        assert main(["verify", "acme/evidence", "test claim"]) == 1
+        assert "not indexed" in capsys.readouterr().err
+
+    def _stub_llm(self, monkeypatch, response_json: str):
+        """Patch the LLM client used by the claims service."""
+
+        class Stub:
+            def complete(self, messages):
+                return response_json
+
+        monkeypatch.setattr("app.services.claims.OllamaClient", lambda *a, **kw: Stub())

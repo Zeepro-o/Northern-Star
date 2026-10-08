@@ -26,9 +26,10 @@ from typing import Callable, Optional
 
 from .config import get_settings
 from .main import APP_VERSION
-from .models.schemas import AnswerResponse, IndexSummary, RepositoryManifest, SearchResponse
+from .models.schemas import AnswerResponse, Claim, IndexSummary, RepositoryManifest, SearchResponse
 from .services import github as github_service
 from .services import qa as qa_service
+from .services import claims as claims_service
 from .services.indexing import evidence_db_path, index_repository
 from .services.ingestion import ingest_github_repo, load_manifest
 from .services.llm import OllamaError
@@ -267,6 +268,91 @@ def _cmd_ask(args) -> int:
     return 0
 
 
+@_wrap_errors
+def _cmd_claims(args) -> int:
+    repo_dir, settings, repo_id = _repo_common(args.repo)
+    raw = load_manifest(repo_dir, settings.manifest_filename)
+    if raw is None:
+        return _fail("Repository has not been ingested yet.")
+    manifest = RepositoryManifest.model_validate(raw)
+    if not manifest.readme_present:
+        if args.json:
+            return _emit_json([])
+        print("No README present.")
+        return 0
+    # Reconstruct structured claims from the raw keyword list
+    claims_list: list[Claim] = []
+    for i, kw in enumerate(manifest.readme_claims):
+        claims_list.append(
+            Claim(
+                id=f"claim_{i}",
+                text=kw,
+                source="README.md",
+                kind="documentation",
+                category="general",
+                verdict="unclear",
+                verdict_explanation="Awaiting evidence verification.",
+                evidence_ids=[],
+                repo_id=repo_id,
+            )
+        )
+    if args.json:
+        return _emit_json([c.model_dump(mode="json") for c in claims_list])
+    print(f"Repository: {repo_id}")
+    print(f"README claims found: {len(claims_list)}")
+    for c in claims_list:
+        print(f"  {c.id}: {c.text} [category: {c.category}]")
+    return 0
+
+
+@_wrap_errors
+def _cmd_verify(args) -> int:
+    repo_dir, settings, repo_id = _repo_common(args.repo)
+    if not (repo_dir / settings.manifest_filename).exists():
+        return _fail("Repository has not been ingested yet.")
+    if args.model:
+        from dataclasses import replace
+
+        settings = replace(settings, ollama_model=args.model)
+
+    claim = Claim(
+        id="claim_0",
+        text=args.claim,
+        source=args.source,
+        kind=args.kind,
+        category=args.category,
+        verdict="unclear",
+        verdict_explanation="",
+        evidence_ids=[],
+        repo_id=repo_id,
+    )
+    verified = claims_service.verify_claim(
+        repo_id=repo_id,
+        claim=claim,
+        settings=settings,
+        top_k=args.top_k,
+    )
+    if args.json:
+        return _emit_json(Claim.model_validate(verified).model_dump(mode="json"))
+    print(f"repo:    {repo_id}")
+    print(f"claim:   {verified.text}")
+    print(f"source:  {verified.source} ({verified.kind})")
+    print(f"verdict: {verified.verdict}")
+    print()
+    print("explanation:")
+    print(verified.verdict_explanation)
+    print()
+    if verified.evidence_ids:
+        kinds = _file_kinds(repo_dir, settings)
+        print("evidence:")
+        for eid in verified.evidence_ids:
+            # We don't have the full citation objects here, but we can show the IDs
+            print(f"  {eid}")
+    else:
+        print("evidence: (none)")
+    return 0
+
+
 def _cmd_version(args) -> int:
     print(APP_VERSION)
     return 0
@@ -319,6 +405,22 @@ def build_parser():
     p.add_argument("--model", default=None, help="Ollama model for this ask (default: OLLAMA_MODEL)")
     common(p)
     p.set_defaults(handler=_cmd_ask)
+
+    p = sub.add_parser("claims", help="extract structured claims from README")
+    p.add_argument("repo", metavar="owner/repo")
+    common(p)
+    p.set_defaults(handler=_cmd_claims)
+
+    p = sub.add_parser("verify", help="verify a claim against the repo's evidence")
+    p.add_argument("repo", metavar="owner/repo")
+    p.add_argument("claim", help="claim text to verify (quote it)")
+    p.add_argument("--source", default="README.md", help="source file path for provenance")
+    p.add_argument("--kind", default="documentation", help="file kind: source, documentation, config, etc.")
+    p.add_argument("--category", default="general", help="claim category")
+    p.add_argument("--top-k", type=int, default=None, help="evidence chunks used (default: QA_TOP_K)")
+    p.add_argument("--model", default=None, help="Ollama model for this verify (default: OLLAMA_MODEL)")
+    common(p)
+    p.set_defaults(handler=_cmd_verify)
 
     p = sub.add_parser("version", help="print the version")
     p.set_defaults(handler=_cmd_version)

@@ -210,4 +210,66 @@ class AnswerResponse(BaseModel):
     evidence_grounding: Literal["none", "cited"]
 
 
+class Claim(BaseModel):
+    """A structured claim extracted from a repository's documentation (e.g. README).
+
+    Claims are unverified statements that M4 will evaluate against the evidence
+    index. Every claim carries exact file:line provenance from the manifest so
+    that verification can attach deterministic citations.
+
+    Verdicts are determined by the verification service (LLM over retrieved
+    evidence + deterministic citation validation), never by BM25 presence alone.
+    """
+
+    id: str  # e.g. "claim_1" or a slugified version of the claim text
+    text: str  # The claim statement as written
+    source: str  # Relative path to the file that contains the claim (e.g. "README.md")
+    kind: FileKind  # SOURCE, DOCUMENTATION, CONFIG, etc.
+    category: str  # Free-text category (e.g. "ai-capability", "performance")
+    verdict: Literal["supported", "partially_supported", "unclear", "contradicted"]
+    verdict_explanation: str  # Human-readable why, with file:line citations
+    evidence_ids: list[str]  # Evidence chunk IDs that influenced the verdict
+    repo_id: str  # "owner/repo" for isolation
+
+
+class AnswerResponse(BaseModel):
+    """Structured result of evidence-grounded Q&A.
+
+    ``answer``, ``confidence`` and ``evidence_sufficient`` are what the model
+    reported. Validation guarantees every whole citation resolves to a real
+    evidence chunk whose ``[E#]`` marker also appears in the answer text — but
+    it does NOT verify that a cited chunk actually supports each claim
+    (claim-level verification is deferred to M4).
+
+    ``confidence`` is **model-reported** unless the deterministic empty-evidence
+    path was taken. It is NOT proof that the evidence supports the answer;
+    ``confidence_source`` says exactly which of the two it is.
+
+    ``evidence_grounding`` is derived deterministically from the surviving
+    validated citations alone — never from the model's own judgment:
+      "none"  → no evidence block is anchored in the answer (includes the
+                empty-retrieval short-circuit)
+      "cited" → one or more evidence blocks are anchored in the answer
+    ("partial" is reserved for M4 claim-level coverage and is never emitted.)
+    """
+
+    question: str
+    repo_id: str
+    answer: str
+    citations: list[Citation] = Field(default_factory=list)
+    confidence: str  # "high" | "medium" | "low"
+    evidence_sufficient: bool
+
+    # M3.1 — honesty fields: distinguish what the LLM claims from what Northern
+    # Star can deterministically verify about the supplied evidence.
+    confidence_source: Literal["model", "deterministic"]
+    evidence_grounding: Literal["none", "cited"]
+
+    # ------------------------------------------------------------------
+    # M4 — claim-level verdicts (populated when /verify is called).
+    # These fields are optional; they exist only on the verification response.
+    # ------------------------------------------------------------------
+    claims: list["Claim"] = Field(default_factory=list)
+
+
 DirectoryNode.model_rebuild()

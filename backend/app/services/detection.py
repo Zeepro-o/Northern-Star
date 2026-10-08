@@ -12,7 +12,7 @@ import tomllib
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
-from ..models.schemas import FileKind, FrameworkInfo
+from ..models.schemas import Claim, FileKind, FrameworkInfo
 
 # ---------------------------------------------------------------------------
 # Directories that are excluded from analysis entirely (not descended into).
@@ -583,6 +583,80 @@ def extract_readme_claims(text: str) -> list[str]:
         elif keyword in lower:
             found.add(keyword)
     return sorted(found)
+
+
+def extract_structured_claims(text: str, source: str = "README.md") -> list[Claim]:
+    """Return structured Claim objects from README text.
+
+    Each claim gets a deterministic ID, is tagged as DOCUMENTATION kind,
+    and receives a category hint derived from the keyword that triggered it.
+    The verdict and evidence_ids are left unpopulated — the verification
+    service fills those in later.
+    """
+    from ..models.schemas import FileKind
+
+    if not text:
+        return []
+
+    raw_claims = extract_readme_claims(text)
+    claims: list[Claim] = []
+
+    # Map keywords to categories for more meaningful grouping
+    keyword_to_category: dict[str, str] = {
+        "machine learning": "ai-capability",
+        "artificial intelligence": "ai-capability",
+        "deep learning": "ai-capability",
+        "neural network": "ai-capability",
+        "nlp": "ai-capability",
+        "natural language processing": "ai-capability",
+        "large language model": "ai-capability",
+        "llm": "ai-capability",
+        "real-time": "performance",
+        "scalable": "performance",
+        "high performance": "performance",
+        "performant": "performance",
+        "distributed": "architecture",
+        "decentralized": "architecture",
+        "microservices": "architecture",
+        "cloud-native": "architecture",
+        "serverless": "architecture",
+        "kubernetes": "architecture",
+        "secure": "security",
+        "production-ready": "quality",
+        "lightweight": "quality",
+        "blazing fast": "quality",
+        "zero dependencies": "quality",
+        "self-hosted": "deployment",
+        "autonomous": "quality",
+    }
+
+    # Also map individual keywords that appear in the text
+    lower_text = text.lower()
+    for claim in raw_claims:
+        # Determine category from keyword-to-category map, fallback to "general"
+        category = keyword_to_category.get(claim, "general")
+
+        # Generate a deterministic claim ID from the claim text
+        claim_id = (
+            claim.lower().replace(" ", "_").replace("-", "_")[:40]
+            or "claim"
+        )
+
+        claims.append(
+            Claim(
+                id=claim_id,
+                text=claim,
+                source=source,
+                kind=FileKind.DOCUMENTATION,
+                category=category,
+                verdict="unclear",  # default until verification
+                verdict_explanation="Awaiting evidence verification.",
+                evidence_ids=[],
+                repo_id="",  # filled in by verification service
+            )
+        )
+
+    return claims
 
 
 def is_readme_filename(filename: str) -> bool:
