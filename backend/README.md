@@ -493,8 +493,9 @@ anchored in retrieved evidence. Empty retrieval renders
 .venv/bin/python -m pytest backend/tests/ -v
 ```
 
-**221 tests**, ~5 seconds, **no network / Ollama / external services needed**
-(all LLM tests run against a mocked httpx transport and stub LLM).
+**377 tests**, ~5 seconds (discovery tests run against a mocked httpx
+transport; only the Q&A/verify/judge/challenge/improvement paths need Ollama,
+and those tests use a stub LLM).
 Coverage includes: chunk generation + line-number correctness + small/large
 file behavior, SQLite schema, index creation + idempotent re-index,
 source-file filtering (binaries/secrets excluded), FTS5 retrieval + BM25
@@ -528,6 +529,120 @@ ask with a stubbed Ollama).
 | `OLLAMA_TIMEOUT_SECONDS` | `180` | Timeout for a single Ollama request (180s headroom for a cold 4B-model load on CPU-only hardware) |
 | `OLLAMA_THINK` | `false` | qwen3-style hidden reasoning. OFF by default — on this hardware it roughly halves answer time (`qwen3:4b` ~128s → ~53s on a grounded 5-block prompt). Set `true` to re-enable on a model that reasons well. Ignored by non-thinking models (`qwen2.5:3b`) |
 | `QA_TOP_K` | `5` | Evidence budget: chunks retrieved + placed in the prompt per question |
+| `GITHUB_TOKEN` | *(unset)* | Optional GitHub personal access token for discovery. Raises API rate limits. Sent only as an `Authorization: Bearer` header — never logged, stored, or returned |
+| `GITHUB_API_BASE_URL` | `https://api.github.com` | GitHub REST API base URL (overridable for tests) |
+| `GITHUB_TIMEOUT_SECONDS` | `15` | Timeout for a single GitHub API request |
+| `DISCOVERY_CACHE_TTL_SECONDS` | `300` | In-process TTL cache for discovery responses (search + trending) |
+
+---
+
+## GitHub discovery (M8.1)
+
+Discovery finds **relevant repositories without ingesting or analyzing them**.
+It returns curated GitHub metadata only — no cloning, no indexing, no M1–M7.1
+analysis. Each result carries `full_name` / `html_url`, so a frontend can
+later offer *"Analyze with Northern Star"* by sending that URL to the
+existing M1 ingestion endpoint.
+
+Uses GitHub's official REST API (`GET /search/repositories`) via a thin
+httpx client (`services/discovery.py`). No HTML scraping, no SDK, no new
+dependencies. Responses are cached in-process for 5 minutes (keyed by all
+request parameters); the cache holds **discovery metadata only** and is never
+treated as analysis evidence.
+
+```bash
+GET /api/v1/discover/search?q=AI%20coding%20agents
+# → {"query": ..., "repositories": [...], "total_count": N,
+#     "page": 1, "per_page": 10, "has_more": true}
+#    params: page >= 1, per_page 1-30, language, sort (best-match|stars|forks|updated), order (asc|desc)
+
+GET /api/v1/discover/trending?limit=10
+# → {"repositories": [{"full_name": ..., "rank": 1, "trend_score": 0.99, "rank_change": null, ...}],
+#     "total": 10, "limit": 10, "generated_at": "..."}
+```
+
+**Trending is Northern Star's API-derived discovery ranking — not an
+official GitHub ranking.** It merges two curated searches (recently created
+popular repos + recently pushed active repos), dedupes by `full_name`, and
+orders by a deterministic trend score:
+
+```text
+S = log10(stars+1) / log10(max_stars+1)        (popularity)
+F = log10(forks+1) / log10(max_forks+1)        (adoption)
+R = max(0, 1 - days_since_push / 365)          (recency)
+trend_score = round(0.5*S + 0.25*F + 0.25*R, 4)
+```
+
+`rank_change` is always `null` in M8.1: no snapshots are stored yet, so the
+service does not pretend to know history (historical trend tracking belongs
+to M8.2).
+
+Rate limits are surfaced cleanly: HTTP 429 with a reset time when GitHub's
+quota is exhausted (set `GITHUB_TOKEN` to raise limits), 504 on timeout,
+502 on upstream failures, 503 when GitHub is unreachable. Transient 5xx gets
+at most one retry. Tokens never appear in responses, errors, or logs.
+
+CLI (note: `search` remains the M2 evidence-index search, so discovery uses
+`discover`):
+
+```bash
+.venv/bin/python -m app.cli discover "AI coding agents" --json
+.venv/bin/python -m app.cli discover "local AI" --language Python --sort stars
+.venv/bin/python -m app.cli trending --limit 20 --json
+```
+
+---
+
+## Historical trends (M8.2)
+
+M8.1 discovery is live-only. M8.2 adds **stored snapshots** so the system can
+answer "what is emerging?" with actual evidence instead of vibes. Snapshots
+live in the existing SQLite evidence database (`discovery_snapshots` table —
+created with `IF NOT EXISTS`, so existing M1–M8.1 data is untouched) and hold
+**discovery metadata only**, never analysis evidence.
+
+**Northern Star's trend rankings are its own deterministic analysis of GitHub
+API data and are not an official GitHub ranking.** Historical quality improves
+as snapshots accumulate: with zero or one snapshot, growth fields are honestly
+`null` rather than fabricated.
+
+```bash
+POST /api/v1/discover/snapshots?limit=100   # explicit capture only — no scheduler
+GET  /api/v1/discover/trends?window=7d&limit=20
+GET  /api/v1/discover/repositories/{owner}/{repo}/history?window=30d
+```
+
+```bash
+.venv/bin/python -m app.cli snapshot-trending --limit 100 --json
+.venv/bin/python -m app.cli trends --window 7d --limit 20 --json
+.venv/bin/python -m app.cli history openclaw/openclaw --window 30d --json
+```
+
+Windows are `24h` / `7d` / `30d`. The comparison matches the latest snapshot
+against the stored snapshot closest to (latest − window) within a ±20%
+tolerance; if none qualifies, the response carries `has_history: false` plus a
+`history_reason` instead of a bogus comparison.
+
+`rank_change = previous_rank − current_rank`: positive moved **UP**, negative
+moved **DOWN**, zero unchanged.
+
+**Popularity vs emergence.** M8.1 `trend_score` measures absolute popularity
+(big repos always win). The M8.2 `emerging_score` rewards *growth* — absolute
+size never enters the formula:
+
+```text
+star_rate = clamp(star_delta / max(prev_stars,1), 0, 5)
+fork_rate = clamp(fork_delta / max(prev_forks,1), 0, 5)
+sg, fg    = rates normalized by the set max (0 when the max is 0)
+rank_imp  = (clamp(prev_rank − curr_rank, −10, 20) + 10) / 30
+activity  = 1.0 if pushed ≤30d ago, linear to 0.0 at 365d, 0.0 if unknown
+emerging_score = round(0.45·sg + 0.20·fg + 0.25·rank_imp + 0.10·activity, 4)
+```
+
+`null` whenever the repo has no previous snapshot in the window. Trend lists
+rank history-backed rows by emerging score first, then history-less rows by
+popularity — the `history_available` flag lets the frontend render the two
+groups distinctly.
 
 ---
 

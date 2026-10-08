@@ -8,7 +8,7 @@ v0.4: claim extraction + evidence verification.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -23,9 +23,14 @@ from ..models.schemas import (
     IndexSummary,
     JudgeResult,
     QuestionRequest,
+    RepositoryHistoryResult,
     RepositoryManifest,
     RepositoryRequest,
+    RepositorySearchResult,
     SearchResponse,
+    TrendResult,
+    TrendSnapshotResult,
+    TrendingResult,
 )
 from ..services import github as github_service
 from ..services import qa as qa_service
@@ -34,6 +39,17 @@ from ..services import judge as judge_service
 from ..services import challenges as challenges_service
 from ..services import improvements as improvements_service
 from ..services import architecture as architecture_service
+from ..services import discovery as discovery_service
+from ..services import trends as trends_service
+from ..services.trends import TrendValidationError
+from ..services.discovery import (
+    DiscoveryConnectionError,
+    DiscoveryError,
+    DiscoveryRateLimitedError,
+    DiscoveryTimeoutError,
+    DiscoveryUpstreamError,
+    DiscoveryValidationError,
+)
 from ..services.indexing import evidence_db_path, index_repository
 from ..services.ingestion import ingest_github_repo, load_manifest
 from ..services.llm import (
@@ -447,3 +463,134 @@ def get_repository_architecture(
         )
     except RepoNotIndexedError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# M8.1 — GitHub Repository Discovery (metadata only; never cloned/indexed)
+# ---------------------------------------------------------------------------
+
+def _discovery_error(exc: DiscoveryError) -> HTTPException:
+    if isinstance(exc, DiscoveryValidationError):
+        return HTTPException(status_code=422, detail=str(exc))
+    if isinstance(exc, DiscoveryRateLimitedError):
+        return HTTPException(status_code=429, detail=str(exc))
+    if isinstance(exc, DiscoveryTimeoutError):
+        return HTTPException(status_code=504, detail=str(exc))
+    if isinstance(exc, DiscoveryConnectionError):
+        return HTTPException(status_code=503, detail=str(exc))
+    return HTTPException(status_code=502, detail=str(exc))
+
+
+@router.get(
+    "/discover/search",
+    response_model=RepositorySearchResult,
+    summary="Search GitHub repositories (discovery metadata only)",
+)
+def discover_search(
+    q: str = Query(..., min_length=1, max_length=256, description="Search query"),
+    page: int = Query(1, ge=1, description="Page number (>= 1)"),
+    per_page: int = Query(10, ge=1, le=30, description="Results per page (1-30)"),
+    language: str = Query(None, max_length=50, description="Filter by language"),
+    sort: Literal["best-match", "stars", "forks", "updated"] = Query(
+        "best-match", description="Sort order"),
+    order: Literal["asc", "desc"] = Query("desc", description="Sort direction"),
+) -> RepositorySearchResult:
+    settings = get_settings()
+    try:
+        return discovery_service.search_discovery(
+            q,
+            settings=settings,
+            page=page,
+            per_page=per_page,
+            language=language,
+            sort=sort,
+            order=order,
+        )
+    except DiscoveryError as exc:
+        raise _discovery_error(exc)
+
+
+@router.get(
+    "/discover/trending",
+    response_model=TrendingResult,
+    summary="Northern Star trending ranking (API-derived, not official GitHub)",
+)
+def discover_trending(
+    limit: int = Query(100, ge=1, le=100, description="Max repositories (1-100)"),
+    language: str = Query(None, max_length=50, description="Filter by language"),
+) -> TrendingResult:
+    settings = get_settings()
+    try:
+        return discovery_service.get_trending(
+            settings=settings,
+            limit=limit,
+            language=language,
+        )
+    except DiscoveryError as exc:
+        raise _discovery_error(exc)
+
+
+# ---------------------------------------------------------------------------
+# M8.2 — Historical Trend Intelligence (stored snapshots + deterministic
+# growth comparison; explicit capture only, no scheduler)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/discover/snapshots",
+    response_model=TrendSnapshotResult,
+    summary="Capture a timestamped discovery snapshot for trend history",
+)
+def capture_snapshot(
+    limit: int = Query(100, ge=1, le=100, description="Repositories to capture (1-100)"),
+) -> TrendSnapshotResult:
+    settings = get_settings()
+    try:
+        return trends_service.capture_trending_snapshot(
+            settings=settings,
+            limit=limit,
+        )
+    except DiscoveryError as exc:
+        raise _discovery_error(exc)
+
+
+@router.get(
+    "/discover/trends",
+    response_model=TrendResult,
+    summary="Windowed growth comparison over stored discovery snapshots",
+)
+def discover_trends(
+    window: Literal["24h", "7d", "30d"] = Query("7d", description="Comparison window"),
+    limit: int = Query(20, ge=1, le=100, description="Max repositories (1-100)"),
+) -> TrendResult:
+    settings = get_settings()
+    try:
+        return trends_service.compare_window(
+            settings=settings,
+            window=window,
+            limit=limit,
+        )
+    except TrendValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@router.get(
+    "/discover/repositories/{owner}/{repo}/history",
+    response_model=RepositoryHistoryResult,
+    summary="Stored snapshots and window comparison for one repository",
+)
+def discover_repo_history(
+    owner: str,
+    repo: str,
+    window: Literal["24h", "7d", "30d"] = Query("30d", description="Comparison window"),
+) -> RepositoryHistoryResult:
+    settings = get_settings()
+    try:
+        return trends_service.get_repository_history(
+            settings=settings,
+            owner=owner,
+            repo=repo,
+            window=window,
+        )
+    except TrendValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))

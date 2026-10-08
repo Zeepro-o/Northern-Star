@@ -26,7 +26,7 @@ from typing import Callable, Optional
 
 from .config import get_settings
 from .main import APP_VERSION
-from .models.schemas import AnswerResponse, ArchitectureResult, ChallengeResult, Claim, ImprovementResult, IndexSummary, JudgeResult, RepositoryManifest, SearchResponse
+from .models.schemas import AnswerResponse, ArchitectureResult, ChallengeResult, Claim, ImprovementResult, IndexSummary, JudgeResult, RepositoryHistoryResult, RepositoryManifest, RepositorySearchResult, SearchResponse, TrendResult, TrendSnapshotResult, TrendingResult
 from .services import github as github_service
 from .services import qa as qa_service
 from .services import claims as claims_service
@@ -34,6 +34,8 @@ from .services import judge as judge_service
 from .services import challenges as challenges_service
 from .services import improvements as improvements_service
 from .services import architecture as architecture_service
+from .services import discovery as discovery_service
+from .services import trends as trends_service
 from .services.indexing import evidence_db_path, index_repository
 from .services.ingestion import ingest_github_repo, load_manifest
 from .services.llm import OllamaError
@@ -557,6 +559,170 @@ def _cmd_architecture(args) -> int:
     return 0
 
 
+@_wrap_errors
+def _cmd_discover(args) -> int:
+    from .services.discovery import DiscoveryError
+
+    # Discovery failures are user-facing (validation) or upstream (GitHub);
+    # surface them as clean errors instead of tracebacks.
+    try:
+        result = discovery_service.search_discovery(
+            args.query,
+            settings=get_settings(),
+            page=args.page,
+            per_page=args.per_page,
+            language=args.language,
+            sort=args.sort,
+            order=args.order,
+        )
+    except DiscoveryError as exc:
+        return _fail(str(exc))
+    if args.json:
+        return _emit_json(RepositorySearchResult.model_validate(result).model_dump(mode="json"))
+
+    print("GitHub Discovery")
+    print("================")
+    print()
+    print(f"Query: {result.query} "
+          f"(page {result.page}, {result.total_count} total)")
+    print()
+    for i, r in enumerate(result.repositories, start=1):
+        print(f"{i}. {r.full_name}")
+        print(f"   ⭐ {r.stars:,}   🍴 {r.forks:,}")
+        if r.language:
+            print(f"   {r.language}")
+        if r.updated_at:
+            print(f"   Updated: {r.updated_at[:10]}")
+        if r.description:
+            print(f"   Description: {r.description[:160]}")
+        print(f"   {r.html_url}")
+        print()
+    return 0
+
+
+@_wrap_errors
+def _cmd_trending(args) -> int:
+    from .services.discovery import DiscoveryError
+
+    try:
+        result = discovery_service.get_trending(
+            settings=get_settings(),
+            limit=args.limit,
+            language=args.language,
+        )
+    except DiscoveryError as exc:
+        return _fail(str(exc))
+    if args.json:
+        return _emit_json(TrendingResult.model_validate(result).model_dump(mode="json"))
+
+    print("Northern Star Trending")
+    print("======================")
+    print("(API-derived discovery ranking — not an official GitHub ranking)")
+    print()
+    for r in result.repositories:
+        print(f"{r.rank}. {r.full_name}")
+        print(f"   ⭐ {r.stars:,}   🍴 {r.forks:,}")
+        if r.language:
+            print(f"   {r.language}")
+        print(f"   Trend score: {r.trend_score}")
+        if r.description:
+            print(f"   Description: {r.description[:160]}")
+        print(f"   {r.html_url}")
+        print()
+    return 0
+
+
+@_wrap_errors
+def _cmd_snapshot_trending(args) -> int:
+    from .services.discovery import DiscoveryError
+    from .services.trends import TrendValidationError
+
+    try:
+        result = trends_service.capture_trending_snapshot(
+            settings=get_settings(),
+            limit=args.limit,
+        )
+    except (DiscoveryError, TrendValidationError) as exc:
+        return _fail(str(exc))
+    if args.json:
+        return _emit_json(TrendSnapshotResult.model_validate(result).model_dump(mode="json"))
+
+    print("Discovery snapshot captured")
+    print(f"  snapshot_at: {result.snapshot_at}")
+    print(f"  repositories: {result.repositories_captured}")
+    print(f"  new rows: {result.new_rows}, skipped duplicates: {result.skipped_duplicates}")
+    return 0
+
+
+@_wrap_errors
+def _cmd_trends(args) -> int:
+    from .services.trends import TrendValidationError
+
+    try:
+        result = trends_service.compare_window(
+            settings=get_settings(),
+            window=args.window,
+            limit=args.limit,
+        )
+    except TrendValidationError as exc:
+        return _fail(str(exc))
+    if args.json:
+        return _emit_json(TrendResult.model_validate(result).model_dump(mode="json"))
+
+    print("Northern Star Trends")
+    print("=====================")
+    print(f"Window: {result.window}   History: "
+          f"{'yes' if result.has_history else 'no — ' + (result.history_reason or '')}")
+    print()
+    for r in result.repositories:
+        flag = " (new)" if not r.history_available else ""
+        print(f"{r.full_name}{flag}")
+        print(f"   ⭐ {r.stars:,}   🍴 {r.forks:,}", end="")
+        if r.star_delta is not None:
+            print(f"   Δ★ {r.star_delta:+,} ({r.star_growth_percent:+.2f}%)", end="")
+        print()
+        if r.rank_change is not None:
+            direction = "UP" if r.rank_change > 0 else ("DOWN" if r.rank_change < 0 else "same")
+            print(f"   rank {r.previous_rank} → {r.current_rank} ({direction})", end="")
+        if r.emerging_score is not None:
+            print(f"   emerging: {r.emerging_score}", end="")
+        print()
+    return 0
+
+
+@_wrap_errors
+def _cmd_history(args) -> int:
+    from .services.trends import TrendValidationError
+
+    try:
+        owner, repo = _parse_owner_repo(args.repo)
+        result = trends_service.get_repository_history(
+            settings=get_settings(),
+            owner=owner,
+            repo=repo,
+            window=args.window,
+        )
+    except (TrendValidationError, ValueError) as exc:
+        return _fail(str(exc))
+    if args.json:
+        return _emit_json(RepositoryHistoryResult.model_validate(result).model_dump(mode="json"))
+
+    print(f"History: {result.full_name} (window {result.window})")
+    if not result.snapshots:
+        print("No snapshots stored for this repository yet.")
+        return 0
+    for s in result.snapshots:
+        print(f"  {s.snapshot_at}  rank={s.rank}  ⭐ {s.stars:,}  🍴 {s.forks:,}")
+    c = result.comparison
+    if c is not None:
+        print(f"Change over {result.window}: Δ★ {c.star_delta:+,} "
+              f"({c.star_growth_percent:+.2f}%), rank change {c.rank_change:+d}, "
+              f"emerging {c.emerging_score}")
+    else:
+        print("Insufficient history for a window comparison.")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -647,6 +813,44 @@ def build_parser():
     p.add_argument("--max-nodes", type=int, default=None, help="max graph nodes (default 200)")
     common(p)
     p.set_defaults(handler=_cmd_architecture)
+
+    p = sub.add_parser("discover", help="search GitHub repositories (discovery metadata only)")
+    p.add_argument("query", help='search query (quote it), e.g. "AI coding agents"')
+    p.add_argument("--page", type=int, default=1, help="page number (default: 1)")
+    p.add_argument("--per-page", type=int, default=10, help="results per page 1-30 (default: 10)")
+    p.add_argument("--language", default=None, help="filter by language, e.g. Python")
+    p.add_argument("--sort", default="best-match",
+                   choices=["best-match", "stars", "forks", "updated"],
+                   help="sort order (default: best-match)")
+    p.add_argument("--order", default="desc", choices=["asc", "desc"],
+                   help="sort direction (default: desc)")
+    common(p)
+    p.set_defaults(handler=_cmd_discover)
+
+    p = sub.add_parser("trending", help="show Northern Star trending repositories (API-derived)")
+    p.add_argument("--limit", type=int, default=100, help="max repositories 1-100 (default: 100)")
+    p.add_argument("--language", default=None, help="filter by language, e.g. Python")
+    common(p)
+    p.set_defaults(handler=_cmd_trending)
+
+    p = sub.add_parser("snapshot-trending", help="capture a timestamped discovery snapshot")
+    p.add_argument("--limit", type=int, default=100, help="repositories to capture 1-100 (default: 100)")
+    common(p)
+    p.set_defaults(handler=_cmd_snapshot_trending)
+
+    p = sub.add_parser("trends", help="compare stored snapshots over a time window")
+    p.add_argument("--window", default="7d", choices=["24h", "7d", "30d"],
+                   help="comparison window (default: 7d)")
+    p.add_argument("--limit", type=int, default=20, help="max repositories 1-100 (default: 20)")
+    common(p)
+    p.set_defaults(handler=_cmd_trends)
+
+    p = sub.add_parser("history", help="show stored snapshots for one repository")
+    p.add_argument("repo", metavar="owner/repo")
+    p.add_argument("--window", default="30d", choices=["24h", "7d", "30d"],
+                   help="comparison window (default: 30d)")
+    common(p)
+    p.set_defaults(handler=_cmd_history)
 
     p = sub.add_parser("version", help="print the version")
     p.set_defaults(handler=_cmd_version)

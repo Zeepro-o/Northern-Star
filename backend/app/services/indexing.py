@@ -92,6 +92,31 @@ CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
     INSERT INTO chunks_fts(chunks_fts, rowid, content) VALUES('delete', old.id, old.content);
     INSERT INTO chunks_fts(rowid, content) VALUES (new.id, new.content);
 END;
+
+-- M8.2 — discovery snapshots: timestamped GitHub metadata captures for
+-- historical trend intelligence. Discovery metadata only; never analysis
+-- evidence. CREATE TABLE/INDEX IF NOT EXISTS so existing databases migrate
+-- safely without touching any M1-M8.1 rows.
+CREATE TABLE IF NOT EXISTS discovery_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    full_name TEXT NOT NULL,             -- "owner/repo"
+    snapshot_at TEXT NOT NULL,           -- UTC ISO-8601, second precision
+    rank INTEGER,
+    stars INTEGER NOT NULL DEFAULT 0,
+    forks INTEGER NOT NULL DEFAULT 0,
+    open_issues INTEGER NOT NULL DEFAULT 0,
+    watchers INTEGER NOT NULL DEFAULT 0,
+    pushed_at TEXT,
+    trend_score REAL,
+    language TEXT,
+    topics TEXT,                         -- JSON array string
+    html_url TEXT,
+    UNIQUE(full_name, snapshot_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_snapshots_full_name ON discovery_snapshots(full_name);
+CREATE INDEX IF NOT EXISTS idx_snapshots_snapshot_at ON discovery_snapshots(snapshot_at);
+CREATE INDEX IF NOT EXISTS idx_snapshots_repo_time ON discovery_snapshots(full_name, snapshot_at);
 """
 
 

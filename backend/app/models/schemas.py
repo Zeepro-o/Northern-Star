@@ -459,4 +459,164 @@ class ArchitectureResult(BaseModel):
     summary: str = ""
 
 
+# ---------------------------------------------------------------------------
+# M8.1 — GitHub Repository Discovery (search + trending metadata only;
+# never repository analysis evidence)
+# ---------------------------------------------------------------------------
+
+
+class GitHubRepository(BaseModel):
+    """Normalized public metadata for one GitHub repository.
+
+    A curated subset of the GitHub REST API repository object — the raw
+    response is never exposed. Nullable fields reflect GitHub omitting or
+    nulling values. Contains enough (``full_name`` / ``html_url``) for the
+    frontend to offer "Analyze with Northern Star" via the M1 endpoint.
+    """
+
+    id: int
+    full_name: str  # "owner/repo"
+    name: str
+    owner: str  # login
+    html_url: str
+    description: Optional[str] = None
+    language: Optional[str] = None
+    stars: int = 0
+    forks: int = 0
+    open_issues: int = 0
+    watchers: int = 0
+    topics: list[str] = Field(default_factory=list)
+    default_branch: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    pushed_at: Optional[str] = None
+    license: Optional[str] = None  # SPDX name, e.g. "MIT"
+    archived: bool = False
+    fork: bool = False
+
+
+class RepositorySearchResult(BaseModel):
+    """One page of GitHub repository search results."""
+
+    query: str  # the user's original query, preserved verbatim
+    repositories: list[GitHubRepository] = Field(default_factory=list)
+    total_count: int = 0
+    page: int = 1
+    per_page: int = 10
+    has_more: bool = False
+
+
+class TrendingRepository(GitHubRepository):
+    """A discovered repository with Northern Star ranking metadata.
+
+    ``rank_change`` is always None until M8.2 introduces stored snapshots —
+    M8.1 must not pretend to know history.
+    """
+
+    rank: int = 0  # 1-based position in this response
+    trend_score: float = 0.0  # deterministic, see discovery service docs
+    rank_change: Optional[int] = None
+
+
+class TrendingResult(BaseModel):
+    """Northern Star's API-derived discovery ranking (not an official GitHub ranking)."""
+
+    repositories: list[TrendingRepository] = Field(default_factory=list)
+    total: int = 0
+    limit: int = 100
+    generated_at: Optional[str] = None  # UTC ISO timestamp
+
+
+# ---------------------------------------------------------------------------
+# M8.2 — Historical Trend Intelligence (stored discovery snapshots +
+# deterministic growth comparison; nulls wherever history is unavailable)
+# ---------------------------------------------------------------------------
+
+
+class TrendSnapshotResult(BaseModel):
+    """Metadata for one explicit snapshot capture (POST /discover/snapshots)."""
+
+    snapshot_at: str  # UTC ISO-8601 of this capture
+    limit: int
+    repositories_captured: int  # repos returned by discovery for this capture
+    new_rows: int  # rows actually inserted
+    skipped_duplicates: int  # rows skipped via UNIQUE(full_name, snapshot_at)
+
+
+class SnapshotPoint(BaseModel):
+    """One stored snapshot row for a repository (actual DB content only)."""
+
+    full_name: str
+    snapshot_at: str
+    rank: Optional[int] = None
+    stars: int = 0
+    forks: int = 0
+    open_issues: int = 0
+    watchers: int = 0
+    pushed_at: Optional[str] = None
+    trend_score: Optional[float] = None
+    language: Optional[str] = None
+    topics: list[str] = Field(default_factory=list)
+    html_url: Optional[str] = None
+
+
+class TrendRepository(BaseModel):
+    """Current vs previous comparison for one repository over a window.
+
+    rank_change = previous_rank - current_rank, so positive means the
+    repository moved UP, negative means it moved DOWN, zero means unchanged.
+    Every historical field is null when history is unavailable — never
+    fabricated. ``history_available`` tells the frontend whether to render
+    growth badges / rank indicators for this row.
+    """
+
+    full_name: str
+    html_url: Optional[str] = None
+    language: Optional[str] = None
+    stars: int = 0
+    forks: int = 0
+    current_rank: Optional[int] = None
+    previous_rank: Optional[int] = None
+    rank_change: Optional[int] = None
+    previous_stars: Optional[int] = None
+    star_delta: Optional[int] = None
+    star_growth_percent: Optional[float] = None
+    previous_forks: Optional[int] = None
+    fork_delta: Optional[int] = None
+    fork_growth_percent: Optional[float] = None
+    current_trend_score: Optional[float] = None
+    previous_trend_score: Optional[float] = None
+    trend_score_change: Optional[float] = None
+    pushed_at: Optional[str] = None
+    previous_pushed_at: Optional[str] = None
+    emerging_score: Optional[float] = None
+    history_available: bool = False
+    comparison_window: str = "7d"
+
+
+class TrendResult(BaseModel):
+    """Windowed trend comparison across the discovery set."""
+
+    window: str  # 24h | 7d | 30d
+    generated_at: str
+    has_history: bool = False
+    history_reason: Optional[str] = None  # why history is unavailable, if so
+    current_snapshot_at: Optional[str] = None
+    previous_snapshot_at: Optional[str] = None
+    repositories: list[TrendRepository] = Field(default_factory=list)
+    total: int = 0
+    limit: int = 20
+
+
+class RepositoryHistoryResult(BaseModel):
+    """Stored snapshots for one repository plus an optional window comparison."""
+
+    full_name: str
+    window: str
+    snapshots: list[SnapshotPoint] = Field(default_factory=list)
+    total_snapshots: int = 0
+    has_history: bool = False
+    comparison: Optional[TrendRepository] = None
+
+
 DirectoryNode.model_rebuild()

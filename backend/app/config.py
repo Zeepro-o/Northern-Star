@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,11 @@ class Settings:
     ollama_timeout_seconds: int
     ollama_think: bool  # qwen3-style hidden reasoning; OFF by default (speed)
     qa_top_k: int
+    # M8.1 — GitHub discovery (search/trending via the official REST API)
+    github_token: Optional[str]
+    github_api_base_url: str
+    github_timeout_seconds: int
+    discovery_cache_ttl_seconds: int
 
 
 def get_settings() -> Settings:
@@ -70,4 +76,12 @@ def get_settings() -> Settings:
         ollama_think=env.get("OLLAMA_THINK", "false").strip().lower()
         in ("1", "true", "yes", "on"),
         qa_top_k=int(env.get("QA_TOP_K", "5")),
+        # M8.1 — optional token raises GitHub API rate limits; never logged
+        # or returned. Base URL is overridable for tests.
+        github_token=env.get("GITHUB_TOKEN") or None,
+        github_api_base_url=env.get(
+            "GITHUB_API_BASE_URL", "https://api.github.com").rstrip("/"),
+        github_timeout_seconds=int(env.get("GITHUB_TIMEOUT_SECONDS", "15")),
+        discovery_cache_ttl_seconds=int(
+            env.get("DISCOVERY_CACHE_TTL_SECONDS", "300")),
     )
