@@ -12,4 +12,4 @@ backend/storage/
 # Editors / OS
 .idea/
 .vscode/
-.DS_Store
+.DS_Storenode_modules/

@@ -3,24 +3,28 @@
 from __future__ import annotations
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from .api.routes import router
 
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.8.1"
 
 
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Northern Star",
         version=APP_VERSION,
-        description=(
-            "Software intelligence platform — v0.3: repository ingestion "
-            "(clone → inspect files → detect languages/frameworks → metadata report), "
-            "a SQLite evidence index with lexical (FTS5) retrieval, and "
-            "evidence-grounded Q&A against a local Ollama model with validated "
-            "file:line citations."
-        ),
+        description="Software intelligence platform",
     )
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     app.include_router(router, prefix="/api/v1")
 
     @app.get("/health", tags=["meta"])
