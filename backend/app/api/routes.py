@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from ..config import get_settings
 from ..models.schemas import (
     AnswerResponse,
+    ArchitectureResult,
     ChallengeResult,
     Claim,
     ImprovementResult,
@@ -32,6 +33,7 @@ from ..services import claims as claims_service
 from ..services import judge as judge_service
 from ..services import challenges as challenges_service
 from ..services import improvements as improvements_service
+from ..services import architecture as architecture_service
 from ..services.indexing import evidence_db_path, index_repository
 from ..services.ingestion import ingest_github_repo, load_manifest
 from ..services.llm import (
@@ -414,3 +416,34 @@ def generate_improvements_endpoint(
         )
     except OllamaResponseError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# M7.1 — Evidence-Grounded Repository Architecture Graph (deterministic)
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/repos/{owner}/{repo}/architecture",
+    response_model=ArchitectureResult,
+    summary="Get a deterministic architecture graph for a repository",
+)
+def get_repository_architecture(
+    owner: str,
+    repo: str,
+    max_nodes: int = Query(None, ge=2, le=2000, description="Max graph nodes (default 200)"),
+) -> ArchitectureResult:
+    repo_dir, settings = _repo_dir(owner, repo)
+    if not (repo_dir / settings.manifest_filename).exists():
+        raise HTTPException(
+            status_code=404, detail="Repository has not been ingested yet."
+        )
+    repo_id = f"{owner.lower()}/{repo.lower()}"
+    try:
+        return architecture_service.build_architecture_graph(
+            repo_id=repo_id,
+            settings=settings,
+            max_nodes=max_nodes,
+        )
+    except RepoNotIndexedError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))

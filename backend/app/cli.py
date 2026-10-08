@@ -26,13 +26,14 @@ from typing import Callable, Optional
 
 from .config import get_settings
 from .main import APP_VERSION
-from .models.schemas import AnswerResponse, ChallengeResult, Claim, ImprovementResult, IndexSummary, JudgeResult, RepositoryManifest, SearchResponse
+from .models.schemas import AnswerResponse, ArchitectureResult, ChallengeResult, Claim, ImprovementResult, IndexSummary, JudgeResult, RepositoryManifest, SearchResponse
 from .services import github as github_service
 from .services import qa as qa_service
 from .services import claims as claims_service
 from .services import judge as judge_service
 from .services import challenges as challenges_service
 from .services import improvements as improvements_service
+from .services import architecture as architecture_service
 from .services.indexing import evidence_db_path, index_repository
 from .services.ingestion import ingest_github_repo, load_manifest
 from .services.llm import OllamaError
@@ -507,6 +508,55 @@ def _cmd_improvements(args) -> int:
     return 0
 
 
+@_wrap_errors
+def _cmd_architecture(args) -> int:
+    from collections import defaultdict
+
+    repo_dir, settings, repo_id = _repo_common(args.repo)
+    if not (repo_dir / settings.manifest_filename).exists():
+        return _fail("Repository has not been ingested yet.")
+
+    result = architecture_service.build_architecture_graph(
+        repo_id=repo_id,
+        settings=settings,
+        max_nodes=args.max_nodes,
+    )
+    if args.json:
+        return _emit_json(ArchitectureResult.model_validate(result).model_dump(mode="json"))
+
+    print("Repository Architecture")
+    print("=======================")
+    print()
+    print(f"Project: {repo_id}")
+    print(result.summary)
+    print()
+    by_parent: dict[str, list] = defaultdict(list)
+    for e in result.edges:
+        if e.relationship == "contains":
+            by_parent[e.source].append(e.target)
+    node_by_id = {n.id: n for n in result.nodes}
+
+    def _show(node_id: str, prefix: str) -> None:
+        children = sorted(by_parent.get(node_id, []))
+        for i, cid in enumerate(children):
+            last = i == len(children) - 1
+            branch = "└── " if last else "├── "
+            child = node_by_id.get(cid)
+            label = child.label if child else cid
+            extra = f" [{child.type}]" if child and child.type != "directory" else ""
+            print(f"{prefix}{branch}{label}{extra}")
+            if child and child.type in ("directory", "project", "backend",
+                                        "frontend", "test"):
+                _show(cid, prefix + ("    " if last else "│   "))
+
+    _show("project", "")
+    print()
+    n_imports = sum(1 for e in result.edges if e.relationship in ("imports", "tests"))
+    print(f"Relationships: {result.total_edges} ({n_imports} imports)")
+    print(f"Evidence citations: {len(result.evidence_citations)}")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -591,6 +641,12 @@ def build_parser():
     p.add_argument("--model", default=None, help="Ollama model for improvements (default: OLLAMA_MODEL)")
     common(p)
     p.set_defaults(handler=_cmd_improvements)
+
+    p = sub.add_parser("architecture", help="show the deterministic repository architecture graph")
+    p.add_argument("repo", metavar="owner/repo")
+    p.add_argument("--max-nodes", type=int, default=None, help="max graph nodes (default 200)")
+    common(p)
+    p.set_defaults(handler=_cmd_architecture)
 
     p = sub.add_parser("version", help="print the version")
     p.set_defaults(handler=_cmd_version)

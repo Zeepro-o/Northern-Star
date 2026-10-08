@@ -410,4 +410,53 @@ class ImprovementResult(BaseModel):
     evidence_citations: list[Citation]  # All evidence cited across improvements
 
 
+# ---------------------------------------------------------------------------
+# M7.1 — Evidence-Grounded Repository Architecture Graph
+# ---------------------------------------------------------------------------
+
+
+class ArchitectureNode(BaseModel):
+    """One component in the repository architecture graph.
+
+    Nodes are derived deterministically from the repository's file inventory
+    and directory structure — never invented by an LLM. ``files`` lists real
+    repository-relative paths; ``evidence_ids`` reference indexed chunks.
+    Stable ``id`` values (``project``, ``dir:<path>``, ``file:<path>``) let
+    the frontend overlay M5/M6/M7 data later.
+    """
+
+    id: str
+    label: str
+    type: str  # project|directory|module|api|service|model|database|test|config|frontend|backend|utility|unknown
+    files: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    description: Optional[str] = None
+
+
+class ArchitectureEdge(BaseModel):
+    """One relationship between two architecture nodes.
+
+    Only emitted when the relationship is established from repository
+    evidence (directory containment or a resolved in-repo import).
+    """
+
+    source: str
+    target: str
+    relationship: str  # contains|imports|depends_on|calls|tests|configures|reads_from|writes_to
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class ArchitectureResult(BaseModel):
+    """Deterministic architecture overview of a repository."""
+
+    repo_id: str
+    root: str  # id of the project root node (always "project")
+    nodes: list[ArchitectureNode] = Field(default_factory=list)
+    edges: list[ArchitectureEdge] = Field(default_factory=list)
+    total_nodes: int = 0
+    total_edges: int = 0
+    evidence_citations: list[Citation] = Field(default_factory=list)
+    summary: str = ""
+
+
 DirectoryNode.model_rebuild()
