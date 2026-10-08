@@ -26,12 +26,13 @@ from typing import Callable, Optional
 
 from .config import get_settings
 from .main import APP_VERSION
-from .models.schemas import AnswerResponse, ChallengeResult, Claim, IndexSummary, JudgeResult, RepositoryManifest, SearchResponse
+from .models.schemas import AnswerResponse, ChallengeResult, Claim, ImprovementResult, IndexSummary, JudgeResult, RepositoryManifest, SearchResponse
 from .services import github as github_service
 from .services import qa as qa_service
 from .services import claims as claims_service
 from .services import judge as judge_service
 from .services import challenges as challenges_service
+from .services import improvements as improvements_service
 from .services.indexing import evidence_db_path, index_repository
 from .services.ingestion import ingest_github_repo, load_manifest
 from .services.llm import OllamaError
@@ -460,6 +461,52 @@ def _cmd_challenges(args) -> int:
     return 0
 
 
+@_wrap_errors
+def _cmd_improvements(args) -> int:
+    repo_dir, settings, repo_id = _repo_common(args.repo)
+    if not (repo_dir / settings.manifest_filename).exists():
+        return _fail("Repository has not been ingested yet.")
+    if args.model:
+        from dataclasses import replace
+
+        settings = replace(settings, ollama_model=args.model)
+
+    result = improvements_service.generate_improvements(
+        repo_id=repo_id,
+        settings=settings,
+        top_k=args.top_k,
+    )
+    if args.json:
+        return _emit_json(ImprovementResult.model_validate(result).model_dump(mode="json"))
+
+    print(f"repo:    {repo_id}")
+    print(f"total improvements: {result.total_improvements}")
+    print(f"  critical: {result.critical_count}, high: {result.high_count}, "
+          f"medium: {result.medium_count}, low: {result.low_count}")
+    print()
+    for imp in result.improvements:
+        print(f"improvement {imp.id}: [{imp.priority}] {imp.title}")
+        print(f"  category:  {imp.category}")
+        print(f"  problem:   {imp.problem}")
+        print(f"  fix:       {imp.recommendation}")
+        print(f"  rationale: {imp.rationale}")
+        print(f"  confidence: {imp.confidence}")
+        if imp.related_challenge_ids:
+            print(f"  challenges: {', '.join(imp.related_challenge_ids)}")
+        if imp.affected_files:
+            print(f"  files: {', '.join(imp.affected_files)}")
+        if imp.evidence_ids:
+            print(f"  evidence:  {', '.join(imp.evidence_ids)}")
+        print()
+    if result.evidence_citations:
+        print("evidence:")
+        for c in result.evidence_citations:
+            print(f"  {c.id}  {c.file_path}:{c.start_line}-{c.end_line}")
+    else:
+        print("evidence: (none)")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -537,6 +584,13 @@ def build_parser():
     p.add_argument("--model", default=None, help="Ollama model for this challenges (default: OLLAMA_MODEL)")
     common(p)
     p.set_defaults(handler=_cmd_challenges)
+
+    p = sub.add_parser("improvements", help="generate evidence-backed improvement recommendations")
+    p.add_argument("repo", metavar="owner/repo")
+    p.add_argument("--top-k", type=int, default=None, help="evidence chunks used per query (default: QA_TOP_K)")
+    p.add_argument("--model", default=None, help="Ollama model for improvements (default: OLLAMA_MODEL)")
+    common(p)
+    p.set_defaults(handler=_cmd_improvements)
 
     p = sub.add_parser("version", help="print the version")
     p.set_defaults(handler=_cmd_version)

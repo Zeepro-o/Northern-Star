@@ -18,6 +18,7 @@ from ..models.schemas import (
     AnswerResponse,
     ChallengeResult,
     Claim,
+    ImprovementResult,
     IndexSummary,
     JudgeResult,
     QuestionRequest,
@@ -30,6 +31,7 @@ from ..services import qa as qa_service
 from ..services import claims as claims_service
 from ..services import judge as judge_service
 from ..services import challenges as challenges_service
+from ..services import improvements as improvements_service
 from ..services.indexing import evidence_db_path, index_repository
 from ..services.ingestion import ingest_github_repo, load_manifest
 from ..services.llm import (
@@ -371,6 +373,44 @@ def generate_challenges_endpoint(
         raise HTTPException(
             status_code=504,
             detail="Ollama timed out while generating challenges.",
+        )
+    except OllamaResponseError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# M7 — Evidence-Based Improvement Engine
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/repos/{owner}/{repo}/improvements",
+    response_model=ImprovementResult,
+    summary="Generate evidence-backed improvement recommendations for a repository",
+)
+def generate_improvements_endpoint(
+    owner: str, repo: str, top_k: int = Query(None, ge=1, le=20, description="Evidence budget per query")
+) -> ImprovementResult:
+    repo_dir, settings = _repo_dir(owner, repo)
+    if not (repo_dir / settings.manifest_filename).exists():
+        raise HTTPException(
+            status_code=404, detail="Repository has not been ingested yet."
+        )
+    repo_id = f"{owner.lower()}/{repo.lower()}"
+    try:
+        return improvements_service.generate_improvements(
+            repo_id=repo_id,
+            settings=settings,
+            top_k=top_k,
+        )
+    except RepoNotIndexedError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except (OllamaUnavailableError, OllamaModelNotInstalledError) as exc:
+        raise HTTPException(status_code=503, detail=f"Ollama unavailable: {exc}")
+    except OllamaTimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail="Ollama timed out while generating improvements.",
         )
     except OllamaResponseError as exc:
         raise HTTPException(status_code=502, detail=str(exc))

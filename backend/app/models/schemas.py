@@ -362,4 +362,52 @@ class ChallengeResult(BaseModel):
     evidence_citations: list[Citation]  # All evidence cited across challenges
 
 
+# ---------------------------------------------------------------------------
+# M7 — Evidence-Based Improvement Engine
+# ---------------------------------------------------------------------------
+
+
+class ImprovementPriority(str, Enum):
+    """Priority level for an improvement recommendation."""
+
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class Improvement(BaseModel):
+    """A concrete, evidence-backed improvement recommendation.
+
+    Derived from M6 challenges, M5 judge results, and M4 claim verification.
+    Every improvement is tied to repository evidence and is technically
+    plausible for this specific repository.
+    """
+
+    id: str  # e.g., "improvement_1"
+    title: str  # Short actionable title
+    problem: str  # What is wrong, with [E#] citations
+    recommendation: str  # Specific actionable steps, with [E#] citations
+    priority: ImprovementPriority
+    category: ChallengeCategory  # Reuse M6 categories
+    rationale: str  # Why this improvement matters, with evidence
+    evidence_ids: list[str]  # IDs of evidence blocks supporting this improvement
+    related_challenge_ids: list[str]  # M6 challenge IDs this addresses
+    affected_files: list[str]  # Existing repo files that would be modified
+    confidence: Literal["high", "medium", "low"]  # Confidence in the recommendation
+
+
+class ImprovementResult(BaseModel):
+    """Structured result of evidence-based improvement generation."""
+
+    repo_id: str
+    improvements: list[Improvement]
+    total_improvements: int
+    critical_count: int
+    high_count: int
+    medium_count: int
+    low_count: int
+    evidence_citations: list[Citation]  # All evidence cited across improvements
+
+
 DirectoryNode.model_rebuild()
